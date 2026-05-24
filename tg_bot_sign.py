@@ -1,28 +1,16 @@
 import asyncio
 import logging
-import re
 import time
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from aiogram.client.default import DefaultBotProperties
 import aiohttp
 
 # ─── КОНФІГ ───────────────────────────────────────────────
-BOT_TOKEN = "8792337275:AAEmX6iJoWdin-jtF-y-2-yF0sIFvXrAKAU"
+BOT_TOKEN = "8165011916:AAFIgE8wSNk1Z7SlcCCXOe28pGNG4_LlJ98"
 RSI_PERIOD = 14
-KLINE_INTERVAL = "1h"
 KLINE_LIMIT = 50
-
-COINS = {
-    "₿ BTC": "BTCUSDT",
-    "Ξ ETH": "ETHUSDT",
-    "💎 TON": "TONUSDT",
-    "✕ XRP": "XRPUSDT",
-    "☀️ SOL": "SOLUSDT",
-    "🔶 BNB": "BNBUSDT",
-    "🐶 DOGE": "DOGEUSDT"
-}
 
 _global_fg_cache = {"value": -1, "label": "недоступно", "updated": 0}
 
@@ -123,39 +111,55 @@ def calc_coin_fear_greed(rsi: float, vol_ratio: float, volatility: float) -> tup
         return (base, "Крайній страх", "🟢")
 
 
-# ─── API та КЕШ ───────────────────────────────────────────
+# ─── API ТА КЕШ (ДЛЯ RENDER ПЕРЕВЕДЕНО НА BYBIT) ───────────
 async def get_cached_global_fg() -> tuple[int, str]:
     now = time.time()
     if now - _global_fg_cache["updated"] < 600 and _global_fg_cache["value"] != -1:
         return _global_fg_cache["value"], _global_fg_cache["label"]
 
     try:
-        async with aiohttp.ClientSession() as session:
+        timeout = aiohttp.ClientTimeout(total=10)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get("https://api.alternative.me/fng/") as resp:
-                res = await resp.json()
-                val = int(res["data"][0]["value"])
-                label = res["data"][0]["value_classification"]
-
-                _global_fg_cache["value"] = val
-                _global_fg_cache["label"] = label
-                _global_fg_cache["updated"] = now
-                return val, label
+                if resp.status == 200:
+                    res = await resp.json()
+                    if "data" in res and len(res["data"]) > 0:
+                        val = int(res["data"][0]["value"])
+                        label = res["data"][0]["value_classification"]
+                        _global_fg_cache["value"] = val
+                        _global_fg_cache["label"] = label
+                        _global_fg_cache["updated"] = now
+        return _global_fg_cache["value"], _global_fg_cache["label"]
     except Exception as e:
         logging.error(f"Помилка отримання глобального індексу: {e}")
         return _global_fg_cache["value"], _global_fg_cache["label"]
 
 
 async def fetch_klines(symbol: str) -> dict:
-    url = "https://api.binance.com/api/v3/klines"
-    params = {"symbol": symbol, "interval": KLINE_INTERVAL, "limit": KLINE_LIMIT}
+    url = "https://api.bybit.com/v5/market/kline"
+    params = {
+        "category": "linear",
+        "symbol": symbol,
+        "interval": "60",  # 1 година
+        "limit": KLINE_LIMIT
+    }
 
     try:
-        async with aiohttp.ClientSession() as session:
+        timeout = aiohttp.ClientTimeout(total=10)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get(url, params=params) as resp:
-                data = await resp.json()
+                if resp.status != 200:
+                    raise ValueError(f"Сервер Bybit відповів кодом {resp.status}")
+                res = await resp.json()
 
-        closes = [float(k[4]) for k in data]
-        volumes = [float(k[5]) for k in data]
+        if "result" not in res or "list" not in res["result"] or len(res["result"]["list"]) == 0:
+            raise ValueError("Такої монети не існує або на біржі немає торгової пари (наприклад, треба вводити BTCUSDT)")
+
+        raw_klines = res["result"]["list"]
+        raw_klines.reverse()
+
+        closes = [float(k[4]) for k in raw_klines]
+        volumes = [float(k[5]) for k in raw_klines]
         current_price = closes[-1]
 
         rsi = calc_rsi(closes)
@@ -250,22 +254,13 @@ bot = Bot(token=BOT_TOKEN, default_properties=DefaultBotProperties(parse_mode="H
 dp = Dispatcher()
 
 
-def main_keyboard() -> InlineKeyboardMarkup:
-    buttons = []
-    row = []
-
-    for name, symbol in COINS.items():
-        btn = InlineKeyboardButton(text=name, callback_data=symbol)
-        row.append(btn)
-
-        if len(row) == 2:
-            buttons.append(row)
-            row = []
-
-    if row:
-        buttons.append(row)
-
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
+# Створюємо зручні шаблони кнопок внизу екрана, щоб користувач міг клікнути, або ввести свою
+def get_main_reply_keyboard() -> ReplyKeyboardMarkup:
+    keyboard = [
+        [KeyboardButton(text="BTCUSDT"), KeyboardButton(text="ETHUSDT")],
+        [KeyboardButton(text="TONUSDT"), KeyboardButton(text="SOLUSDT")]
+    ]
+    return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
 
 @dp.message(CommandStart())
@@ -277,39 +272,45 @@ async def cmd_start(message: types.Message):
 
     await message.answer(
         f"🤖 <b>Trading Advisor Bot</b>{fg_text}\n\n"
-        f"Обери монету — я проаналізую RSI, об'єм, волатильність\n"
-        f"та індекс страху/жадібності:",
-        reply_markup=main_keyboard(),
+        f"✍️ <b>Введи назву будь-якої монети текстом</b> (наприклад: <code>sol</code>, <code>btc</code>, <code>ada</code> або повну пару <code>ETHUSDT</code>):\n\n"
+        f"Або обери швидкий варіант із меню нижче 👇",
+        reply_markup=get_main_reply_keyboard()
     )
 
 
-@dp.callback_query(F.data.in_(COINS.values()))
-async def handle_coin(callback: types.CallbackQuery):
-    symbol = callback.data
-    coin_name = [k for k, v in COINS.items() if v == symbol][0]
+# Обробник БУДЬ-ЯКОГО тексту, який надсилає користувач
+@dp.message(F.text)
+async def handle_any_coin(message: types.Message):
+     user_input = message.text.strip().upper()
 
-    # Тут додано parse_mode="HTML", щоб сервісне повідомлення теж було красивим
-    await callback.message.answer(f"⏳ Аналізую {coin_name}...", parse_mode="HTML")
+     if not user_input.endswith("USDT") and not user_input.endswith("USDC"):
+         symbol = f"{user_input}USDT"
+     else:
+         symbol = user_input
 
-    try:
-        data = await fetch_klines(symbol)
-        global_fg = await get_cached_global_fg()
-        advice = generate_advice(data, global_fg)
+     status_msg = await message.answer(f"⏳ Аналізую торгову пару <b>{symbol}</b>...", parse_mode="HTML")
 
-        # Виправлено: Я додав parse_mode="HTML" сюди, щоб теги розпізнавалися Телеграмом
-        await callback.message.answer(
-            advice,
-            reply_markup=main_keyboard(),
-            parse_mode="HTML"
-        )
-    except Exception as e:
-        await callback.message.answer(
-            f"❌ Помилка: {e}\n\nСпробуй ще раз:",
-            reply_markup=main_keyboard(),
-            parse_mode="HTML"
-        )
+     try:
+         data = await fetch_klines(symbol)
+         global_fg = await get_cached_global_fg()
+         advice = generate_advice(data, global_fg)
 
-    await callback.answer()
+         # Надсилаємо аналіз і повністю стираємо кнопки знизу
+         await message.answer(advice, reply_markup=ReplyKeyboardRemove(), parse_mode="HTML")
+     except Exception as e:
+         # У разі помилки також ховаємо кнопки
+         await message.answer(
+             f"❌ <b>Помилка аналізу {symbol}</b>\n\n"
+             f"Переконайся, що ти ввів назву правильно.\n"
+             f"<i>Опис помилки: {e}</i>",
+             reply_markup=ReplyKeyboardRemove(),
+             parse_mode="HTML"
+         )
+     finally:
+         try:
+             await status_msg.delete()
+         except Exception:
+             pass
 
 
 async def main():
