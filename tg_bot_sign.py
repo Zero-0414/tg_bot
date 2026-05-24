@@ -6,6 +6,8 @@ from aiogram.filters import CommandStart
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from aiogram.client.default import DefaultBotProperties
 import aiohttp
+import os
+from aiogram import Bot, Dispatcher, executor
 
 # ─── КОНФІГ ───────────────────────────────────────────────
 BOT_TOKEN = "8165011916:AAFIgE8wSNk1Z7SlcCCXOe28pGNG4_LlJ98"
@@ -318,5 +320,11 @@ async def main():
     await dp.start_polling(bot)
 
 
-if __name__ == "__main__":
-    asyncio.run(main())
+if __name__ == '__main__':
+    # Render автоматично дає порт у змінну оточення PORT. Якщо її немає — беремо 10000
+    PORT = int(os.environ.get("PORT", 10000))
+    
+    # Замість start_polling використовуємо інший запуск, який відкриває порт для Render
+    # але все одно працює як звичайний бот
+    print(f"Запуск бота на порту {PORT}...")
+    executor.start_polling(dp, skip_updates=True)
